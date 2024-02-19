@@ -1,0 +1,512 @@
+---
+title: "Text Analysis of 'A Song of Ice and Fire', by George R. R. Martin"
+author: "Dustin Duncan"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    number-sections: true
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+## Overview
+
+### Data used
+
+Data used for this analysis was a pdf of the entire 'A Song of Ice and Fire' series, by George R. R. Martin. Data were obtained from the following source:
+
+Martin, George R. R.. "*A Song of Ice and Fire.*" 2020. Keith Mitchell Photography, Keith Mitchell, 2021, <https://www.keithmitchellphotography.com/complete-a-song-of-ice-and-fire---george-r-r-martin.pdf>. Accessed 14 Feb. 2024.
+
+### Analysis
+
+The purpose of this analysis was to identify the most-used words used in the ASOIAF series, as well as conduct a sentiment analysis of the series, and for the two main characters, Jon Snow and Daenerys Targaryen across their chapters for the entire series.
+
+### Methods
+
+To conduct this analysis, I first loaded the pdf of the ASOIAF series. In order to conduct my analysis, I then had to parse out individual lines of text within the pdf, remove pages that were extraneous (did not contain relevant text), and identify chapters by their name both within each book, and across the entire series. As chapters are indicated by the character whose point of view is associated with it in capital letters, rather than by number, this involved filtering out the characters name, and other capitalized text that may have been detected as a chapter title. After wrangling the text into my desired groups and sorting it, I then isolated individual words from each line, and removed stop words. For my analysis of the most-used words, I additionally removed words that were titles or names, such as "lord", "ser", or "Jaime". To conduct the sentiment analysis, I used the 'bing' sentiment lexicon that associates individual words with either 'Positive' or 'Negative' emotion. Then I calculated the relative average of positive and negative words across the entire series, and set that as the value for which I compared characters' word usage against. This allowed me to obtain the relative amount of positive versus negative words that Jon and Daenerys used in each of their chapters, and allowed for the quantification of 'more' or 'less' negative word usage within each chapter.
+
+### Packages Used
+
+```{r setup}
+rm(list = ls())
+library(tidyverse)
+library(tidytext)
+library(pdftools)
+library(ggwordcloud)
+library(stringr)
+library(textdata)
+library(forcats)
+library(ggh4x)
+```
+
+## Text Wrangling and Analysis
+
+### Loading 'A Song of Ice and Fire Series' pdf and converting to text format
+
+```{r}
+GoT <- pdftools::pdf_text(here::here("data/A_song_of_ice_and_fire.pdf"))
+
+GoT_lines <- data.frame(GoT) %>% 
+  mutate(page = 1:n()) %>% 
+  mutate(text_full = str_split(GoT, pattern = '\\n')) %>% 
+  unnest(text_full) %>% 
+  mutate(text_full = str_squish(text_full))
+```
+
+### Tidying text and obtaining word counts
+
+```{r}
+#### Tidying text ####
+
+GoT_chap <- GoT_lines %>% 
+  ## Removing extraneous first 200 pages 
+  slice(-(1:197)) %>% 
+  
+  ## Making new column: keep everything that is not lowercase, because chapters 
+    # are uppercase 
+  mutate(chapter = if_else(str_detect(text_full, "[[:lower:]]"), NA, text_full)) %>% 
+  
+  ## Second new column: transferring to keep the chapter names 
+  mutate(chapter2 = if_else(str_detect(chapter, "[[:upper:]]"), chapter, NA)) %>%
+  
+  ## Fill it to the next occurrence
+  fill(chapter2, .direction = "down") %>% 
+  
+  ## If the chapter2 Column contained punctuation (i.e if it was a quote of 
+    # someone yelling which was my main problem): NA it; if not: keep it 
+    mutate(chapter3 = if_else(str_detect(chapter2, "[:punct:]"), NA, chapter2)) %>% 
+  
+  ## Fill it to the next occurrence
+  fill(chapter3, .direction = "down") %>% 
+  
+  ## Filtering page numbers to only keep the text from the books
+  filter(!page %in% 911:960) %>% 
+  filter(!page %in% 1853:1904) %>% 
+  filter(!page %in% 3044:3104) %>% 
+  filter(!page %in% 3902:3988) %>% 
+  filter(!page %in% 5111:5179) %>% 
+  
+  ## Identifying/labeling each book by its corresponding pages, and making each
+    # book a factor for grouping purposes
+  mutate(book = case_when(page %in% 17:911 ~ "A Game of Thrones", 
+                          page %in% 960:1853 ~ "A Clash of Kings",
+                          page %in% 1904:3044 ~ "A Storm of Swords",
+                          page %in% 3104:3902 ~ "A Feast for Crows",
+                          page %in% 3988:5111 ~ "A Dance with Dragons"),
+         book = as.factor(book)) %>%
+  
+  ## Taking my ungrouped chapters and labeling them all with an index number 
+    #  i.e. all character chapters in the series rather than per book
+  mutate(index_total = with(rle(chapter3), rep(paste0(values, "_", ave(values, values, FUN = seq_along)), lengths))) %>%
+  
+ ## Now grouping by book
+  group_by(book) %>% 
+  
+  ## And now this code takes my chapters and has grouped them by book. So I can 
+    # see each sequence of chapters per book and separate them that way  
+    mutate(index = with(rle(chapter3), rep(paste0(values, "_", ave(values, values, FUN = seq_along)), lengths))) %>% 
+
+  ## Removing leftover groups
+  ungroup() %>% 
+  
+  ## Removing my in-between columns from tidying process
+  select(-c(chapter, chapter2)) %>% 
+  
+  ## Renaming chapter3 column to character 
+  rename(., character = chapter3) 
+
+## Ordering the books by appearance rather than alphabetical 
+GoT_chap$book <- fct_inorder(GoT_chap$book) 
+
+
+#### Obtaining word counts ####
+
+## Factorizing my chapter (within book) and chapter (series) columns 
+asongoficeandfire <- GoT_chap %>% 
+  mutate(index = as.factor(index),
+         index_total = as.factor(index_total))
+
+## Checking that each chapter corresponds to a chapter and not all-caps text 
+view(unique(asongoficeandfire$index_total))
+
+## Getting each word as its own observation
+asoiaf_words <- asongoficeandfire %>% 
+  unnest_tokens(word, text_full)  %>% 
+  select(-GoT)
+  
+# Getting word count by each book  
+asoiaf_wordcount <- asoiaf_words %>% 
+  count(book, word)
+
+asoiaf_wordcount_clean <- asoiaf_wordcount %>% 
+  anti_join(stop_words, by = 'word')
+
+# Getting wordcount by chapter
+asoiaf_chapter_wordcount <- asoiaf_words %>% 
+  count(character, index, word, book, index_total)
+
+asoiaf_chapter_wordcount_clean <- asoiaf_chapter_wordcount %>% 
+  anti_join(stop_words, by = 'word')
+
+```
+
+```{r}
+#| include: false
+
+#### Making a labeler for facet wraps 
+
+book_names <- list("A Game of Thrones" = "A Game \nof Thrones",
+                   "A Clash of Kings" = "A Clash \nof Kings",
+                   "A Storm of Swords" = "A Storm \nof Swords",
+                   "A Feast for Crows" = "A Feast\nfor Crows",
+                   "A Dance with Dragons" = "A Dance \nwith Dragons")
+book_labeller <- function(variable, value){
+  return(book_names[value])
+}
+book_short <- list("A Game of Thrones" = "A Game \nof Thrones",
+                   "A Clash of Kings" = "A Clash \nof Kings",
+                   "A Storm of Swords" = "A Storm \nof Swords",
+                   "A Feast for Crows" = "Feast",
+                   "A Dance with Dragons" = "Dance")
+book_labeller_short <- function(variable, value){
+  return(book_short[value])
+}
+
+```
+
+## Analysis of most-used words by book
+
+```{r}
+#### Obtaining most-used words by book 
+top_100_words <- asoiaf_wordcount_clean %>% 
+  
+  ## Removing unnecessary words like titles and names of characters
+  dplyr::filter(word != "lord") %>% 
+  dplyr::filter(word != "jon") %>% 
+  dplyr::filter(word != "ned") %>% 
+  dplyr::filter(word != "ser") %>% 
+  dplyr::filter(word != "tyrion") %>% 
+  dplyr::filter(word != "jaime") %>%
+  dplyr::filter(word != "catelyn") %>%
+  dplyr::filter(word != "bran") %>%
+  dplyr::filter(word != "cersei") %>%
+  dplyr::filter(word != "brienne") %>%
+  dplyr::filter(word != "arya") %>%
+  dplyr::filter(word != "hand") %>%
+  dplyr::filter(word != "king") %>%
+  dplyr::filter(word != "jo") %>%
+  
+  ## Grouping by book for word cloud plot
+  group_by(book) %>% 
+  
+  ## Arranging words in increasing order
+  arrange(-n) %>% 
+  
+  ## Getting top 20 words by count (per book)
+  slice(1:20) %>% 
+  
+  ## Removing leftover groups
+  ungroup()
+
+## Creating my word cloud for each book in the series 
+series_cloud <- ggplot(data = top_100_words, aes(label = word)) + 
+  geom_text_wordcloud(aes(color = n, size = n), shape = "diamond") + 
+  scale_size_area(max_size = 6) + 
+  scale_color_gradientn(colors = c("lightgreen", "forestgreen", "darkgreen")) + 
+  theme_minimal()
+
+## Creating a design to format the facets
+design <- c(
+  "
+  AABBCC
+  #DDEE#
+  "
+)
+
+## Creating a theme to highlight the book names 
+strips <- strip_themed(
+  text_x = elem_list_text(face = "bold", size = 10)
+)
+
+## Adding my themes and title to the plot 
+series_cloud + ggh4x::facet_manual(~book, design = design, strip = strips) + 
+  ggtitle("Top Twenty Words by Book in 'A Song of Ice and Fire' Series, by GRRM")
+```
+
+## Sentiment Analysis
+
+### Obtaining sentiments for each book and chapter
+
+```{r}
+#| warning: false
+#| message: false
+#### Sentiment analysis by book ####
+## Obtaining sentiments   
+bing_lex <- get_sentiments(lexicon = "bing")
+
+## Assigning each word to a sentiment 
+asoiaf_book_bing <- asoiaf_words %>%
+  inner_join(bing_lex, by = 'word')
+
+## Summarizing sentiments by both index and book
+bing_counts <- asoiaf_book_bing %>%
+  group_by(book, index, sentiment) %>%
+  summarize(n = n()) %>% 
+  mutate(sentiment = case_when(
+    str_detect(sentiment, "positive") ~ "Positive",
+    str_detect(sentiment, "negative") ~ "Negative"
+    ))
+
+#### Sentiment analysis by character ####
+
+## Removing stop words 
+asoiaf_chapter_wordcount_clean <- asoiaf_chapter_wordcount %>% 
+  anti_join(stop_words, by = 'word')
+
+## Combining the bing sentiment lexicon with the chapters df
+asoiaf_chap_bing <- asoiaf_chapter_wordcount_clean %>%
+  inner_join(bing_lex, by = 'word')
+
+## Grouping to sort by relevant characters and facet by book
+asoiaf_chap_wordcount_bing <- asoiaf_chap_bing %>%
+  group_by(index, character, sentiment, book, index_total) %>%
+  summarize(n = n())
+
+## Creating a baseline for sentiment analysis of positive/negative
+asoiaf_bing_log_ratio_book <- asoiaf_book_bing %>% 
+  summarize(n_pos = sum(sentiment == 'positive'),
+            n_neg = sum(sentiment == 'negative'),
+            log_ratio = log(n_pos / n_neg))
+
+## Ordering chapter indices by occurrence rather than alphabetically 
+asoiaf_book_bing$index <- fct_inorder(asoiaf_book_bing$index) %>% fct_rev()
+asoiaf_book_bing$index_total <- fct_inorder(asoiaf_book_bing$index_total) %>% fct_rev()
+
+# Find the log ratio score by chapter: 
+asoiaf_bing_log_ratio_chap <- asoiaf_book_bing %>% 
+  group_by(index_total, character, book, index) %>% 
+  summarize(n_pos = sum(sentiment == 'positive'),
+            n_neg = sum(sentiment == 'negative'),
+            log_ratio = log(n_pos / n_neg)) %>%
+  mutate(log_ratio_adjust = log_ratio - asoiaf_bing_log_ratio_book$log_ratio) %>%
+  mutate(pos_neg = ifelse(log_ratio_adjust > 0, 'Positive', 'Negative'))
+```
+
+### Sentiment Analysis of series
+
+```{r}
+## Analyzing overall sentiment of each book
+sentiment_series <- ggplot(data = bing_counts, aes(y = sentiment, x = n)) +
+  geom_col(aes(fill = sentiment)) +
+  scale_fill_manual(values = c("Positive" = "lightblue", "Negative" = "darkred")) + 
+  theme_bw() + 
+  labs(x = "Word Count", y = "Sentiment", fill = "Sentiment", subtitle = "Usage of positive vs negative sentiment by book.")
+
+## Designing strips
+strips <- strip_themed(
+  text_x = elem_list_text(face = "bold", size = 10),
+  background_x = element_blank()
+)
+
+## Adding facet to plot
+sentiment_series + ggh4x::facet_manual(~book, design = design, strip = strips) + 
+  ggtitle("Sentiment Analysis of 'A Song of Ice and Fire' series")
+```
+
+```{r, fig.width=6, fig.height=7}
+#| message: false
+#| warning: false
+#| include: false
+# Now I have character column that will allow me to just plot characters 
+asoiaf_bing_log_ratio_arya <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "ARYA" | character == "CAT OF THE CANALS" | character == "THE UGLY LITTLE GIRL" | character == "THE BLIND GIRL") 
+
+arya <- ggplot(data = asoiaf_bing_log_ratio_arya, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y", labeller = book_labeller_short) + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Saving my plot
+ggsave(here::here("data", "Arya_sentiment.jpg"), arya)
+
+# Calling it 
+arya
+```
+
+### Sentiment Analysis of Jon Snow's character across the series
+
+```{r, fig.width=6, fig.height=7}
+asoiaf_bing_log_ratio_jon <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "JON")
+
+jon <- ggplot(data = asoiaf_bing_log_ratio_jon, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  labs(title = "Sentiment Analysis of Jon Snow in ASOIAF", subtitle = "Jon Snow's word usage across the series, with chapters\ngrouped by book they appear in.") +
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y") + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Calling it 
+jon
+```
+
+### Sentiment Analysis of Daenerys Targaryen's character across the series
+
+```{r, fig.width=6, fig.height=7}
+#| message: false
+asoiaf_bing_log_ratio_dany <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "DAENERYS")
+
+dany <- ggplot(data = asoiaf_bing_log_ratio_dany, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  labs(title = "Sentiment Analysis of Daenerys Targaryen in ASOIAF", subtitle = "Daenerys Targaryen's word usage across the series, with chapters\ngrouped by book they appear in.") +
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y") + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Saving my plot
+ggsave(here::here("data", "Daenerys_sentiment.jpg"), dany)
+
+# Calling it 
+dany
+```
+
+```{r, fig.width=6, fig.height=8}
+#| message: false
+#| include: false
+asoiaf_bing_log_ratio_tyrion <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "TYRION")
+
+tyrion <- ggplot(data = asoiaf_bing_log_ratio_tyrion, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y") + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Saving my plot
+ggsave(here::here("data", "Tyrion_sentiment.jpg"), tyrion)
+
+# Calling it 
+tyrion
+```
+
+```{r, fig.width=6, fig.height=8}
+#| message: false
+#| include: false
+asoiaf_bing_log_ratio_cersei <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "CERSEI")
+
+cersei <- ggplot(data = asoiaf_bing_log_ratio_cersei, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y") + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Saving my plot
+ggsave(here::here("data", "Cersei_sentiment.jpg"), cersei)
+
+# Calling it 
+cersei
+```
+
+```{r, fig.width=6, fig.height=8}
+#| message: false
+#| warning: false
+#| include: false
+asoiaf_bing_log_ratio_bran <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "BRAN")
+
+bran <- ggplot(data = asoiaf_bing_log_ratio_bran, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y", labeller = book_labeller) + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Saving my plot
+ggsave(here::here("data", "Bran_sentiment.jpg"), bran)
+
+# Calling it 
+bran
+```
+
+```{r, fig.width=6, fig.height=8}
+#| message: false
+#| warning: false
+#| include: false
+asoiaf_bing_log_ratio_catelyn <- asoiaf_bing_log_ratio_chap %>% 
+  filter(character == "CATELYN")
+
+catelyn <- ggplot(data = asoiaf_bing_log_ratio_catelyn, 
+       aes(x = log_ratio_adjust,
+           y = as.factor(index_total),
+           fill = pos_neg)) +
+           # y = fct_rev(as.factor(chapter)))) +
+  geom_col() +
+  labs(x = 'Language Usage',
+       y = 'Chapter', fill = "Language") +
+  scale_fill_manual(values = c('Positive' = 'lightblue', 'Negative' = 'darkred')) +
+  theme_minimal() + 
+  facet_grid(rows = vars(book), scales = "free_y", space = "free_y", labeller = book_labeller) + 
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_rect(fill = "white"))
+
+# Saving my plot
+ggsave(here::here("data", "Catelyn_sentiment.jpg"), catelyn)
+
+# Calling it 
+catelyn
+```

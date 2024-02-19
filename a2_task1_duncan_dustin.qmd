@@ -1,0 +1,142 @@
+---
+title: "Spatial Analysis of California Oil Spills in 2008 "
+author: "Dustin Duncan"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    number-sections: true
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+## Overview
+
+### Data Used
+
+The data used for this spatial analysis were oil spill locations in 2008 across California, and California County boundaries shape files. Data were obtained from the following sources:
+
+Oil spill data:
+
+“Oil Spill Incident Tracking \[DS394\].” California State Geoportal, [gis.data.ca.gov/datasets/7464e3d6f4924b50ad06e5a553d71086_0/explore?location=36.773062%2C-119.422009%2C6.74](https://gis.data.ca.gov/datasets/7464e3d6f4924b50ad06e5a553d71086_0/explore?location=36.773062%2C-119.422009%2C6.74). Accessed 15 Feb. 2024.
+
+California Counties shapefile: 
+
+“CA Geographic Boundaries - Dataset - California Open Data.” California Open Data Portal, [data.ca.gov/dataset/ca-geographic-boundaries/resource/b0007416-a325-4777-9295-368ea6b710e6?inner_span=True](data.ca.gov/dataset/ca-geographic-boundaries/resource/b0007416-a325-4777-9295-368ea6b710e6?inner_span=True). Accessed 12 Feb. 2024.
+
+### Analysis
+
+The purpose of this analysis was to identify which counties in California had the largest proportion of inland oil spills in the year 2008 with a choropleth map. In addition, an interactive map is included which allows the user to see individual locations of oil spills in California in 2008, which are colored blue for marine oil spills and green for landed oil spills.
+
+### Methods
+To start, we read in the California shapefile and oil spill data. We then converted the oil spill data to a simple feature object using it's longitude and latitude columns, and converted its coordinate reference system to that of the California shapefile. Next, we wrote the oil data as a geopackage and reloaded it as a simple feature collection, to make it easier to tidy and analyze. We then joined the oil spill data to the California data, so as to associate each oil spill location with the county that it occurred in. We then plotted oil spill locations and California counties on an interactive map using the 'tmap' function from the 'tidyterra' package. To create our choropleth map, we grouped our joined dataframe by county name, and summed the amount of oil spills within each county. This allowed us to plot each county and the relative amount of oil spills within it on a gradient color scheme, with darker colors indicating higher numbers of oil spills.
+
+### Packages Used
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(here)
+### for working with vector spatial data:
+library(sf)
+### for working with rasters:
+library(terra)
+library(tidyterra)
+### for creating cool maps:
+library(tmap)
+### for the geospatial statistics:
+library(gstat)
+library(stars)
+rm(list = ls())
+```
+
+## Spatial data visualization
+
+#### Loading in oil and counties data and wrangling
+
+```{r}
+#| message: false
+
+# reading in oil spill data and california counties data and cleaning names
+## from the metadata we found that the CRS for the latitude and longitude points 
+  # is NAD83 --> Going to convert it to the california sf crs
+oil_df <- read_csv(here("/Users/dustinduncan/Desktop/ESM 244/ESM_244_assignment2/data/Oil_Spill_Incident_Tracking_[ds394].csv")) %>% 
+  janitor::clean_names()
+
+## This is ID["EPSG",3857]] So what we're going to convert the oil data to
+ca_counties_sf <- read_sf(here("/Users/dustinduncan/Desktop/ESM 244/esm244_w2024_lab3/data/ca_counties"), layer = "CA_Counties_TIGER2016") %>% 
+  janitor::clean_names() %>% 
+  select(name)
+
+# Converting oil_df to sf object with NAD83 CRS
+oil_sf <- st_as_sf(oil_df, coords = c("longitude", "latitude"),
+                   crs = 4269)
+
+# Updating the oil data to match the CRS of california data
+oil_ca_sf <- st_transform(oil_sf, 3857)
+
+# Converting the oil sf into a geopackage and reloading to make it easier to
+  # work with
+write_sf(oil_ca_sf, here("data", "oil_ca_a2.gpkg"))
+
+# reading it in 
+oil_new_sf <- read_sf(here("data", "oil_ca_a2.gpkg")) %>% 
+  janitor::clean_names()
+
+# Confirming matching CRS 
+# st_crs(oil_new_sf) #--> WGS 84/ Pseudo-Mercator (epsg 3857)
+# st_crs(ca_counties_sf) #--> WGS 84/ Pseudo-Mercator (epsg 3857)
+
+# Joining my two datasets so as to find counts of oil spills per county
+ca_oil_sf <- ca_counties_sf %>% 
+  st_join(oil_new_sf)
+
+```
+
+### Interactive map of California counties and oil spill locations 
+
+```{r}
+#| message: false
+tmap_mode("view")
+
+# Plotting California Counties to overlay oil spills onto
+tm_cali <- tm_shape(ca_counties_sf) + 
+  tm_borders() 
+
+# Adding oil spill points to tmap
+tm_cali + 
+  tm_shape(oil_ca_sf) +
+  tm_dots("inlandmari", title = "Location of Spill", palette=c(Inland="forestgreen", Marine="lightblue")) + 
+  tm_layout(title = "Oil Spills in California in 2008") + 
+  tm_basemap()
+```
+
+### Choropleth indicating the number of oil spills by county in California
+
+```{r}
+# Filtering out marine oil spills
+oil_counts_sf <- ca_oil_sf %>% 
+  dplyr::filter(inlandmari == "Inland") %>% 
+  mutate(dateofinci = if_else(str_detect(.$dateofinci, "2008/"), dateofinci, NA)) %>% 
+  group_by(name) %>% 
+  summarize(n_records = sum(!is.na(objectid))) %>% 
+  mutate(n_records = as.numeric(n_records))
+
+# Grabbing Modoc county because it was excluded with our previous wrangling 
+modoc_county <- ca_counties_sf %>% 
+  dplyr::filter(name == "Modoc")
+
+# Creating choropleth
+ggplot(data = oil_counts_sf) + 
+  geom_sf(aes(fill = n_records), color = "darkgray", size = 0.1) + 
+  geom_sf(data = modoc_county, fill = "lightgray", color = "darkgray", inherit.aes = TRUE) + 
+  scale_fill_gradientn(colors = c("lightgray", "lightgreen", "green", "forestgreen", "darkgreen")) + 
+  theme_minimal() + 
+  labs(fill = "Oil Spill Counts", title = "Inland Oil Spills in CA Counties in 2008", subtitle = "Choropleth plotting the amount of inland oil\nspills per county in California in 2008.")
+```
